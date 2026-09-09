@@ -1,4 +1,5 @@
 const express = require("express");
+const { Pool } = require("pg");
 
 const app = express();
 
@@ -7,14 +8,44 @@ app.use(express.json());
 const PORT = process.env.PORT || 3000;
 const MONDAY_API_TOKEN = process.env.MONDAY_API_TOKEN;
 const ZAPIER_WEBHOOK_URL = process.env.ZAPIER_WEBHOOK_URL;
+const DATABASE_URL = process.env.DATABASE_URL;
 
 // --------------------------------------------------
-// OPSAMLING AF SYN
-// Key = itemId
-// Value = syn-data
+// POSTGRESQL
 // --------------------------------------------------
 
-const collectedSyn = new Map();
+if (!DATABASE_URL) {
+  console.error("DATABASE_URL mangler i Railway Variables");
+}
+
+const pool = new Pool({
+  connectionString: DATABASE_URL,
+  ssl: {
+    rejectUnauthorized: false
+  }
+});
+
+// --------------------------------------------------
+// INITIALISER DATABASE
+// --------------------------------------------------
+
+async function initializeDatabase() {
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS syn (
+      item_id TEXT PRIMARY KEY,
+      lejemalsnr TEXT,
+      adresse TEXT,
+      vaerelser TEXT,
+      type_syn TEXT,
+      dato DATE,
+      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+      sent_to_zapier BOOLEAN DEFAULT FALSE,
+      sent_at TIMESTAMP NULL
+    )
+  `);
+
+  console.log("Database klar");
+}
 
 // --------------------------------------------------
 // MONDAY GRAPHQL
@@ -55,51 +86,84 @@ async function mondayGraphQL(query, variables = {}) {
 }
 
 // --------------------------------------------------
-// TEST / STATUS
+// STATUS
 // --------------------------------------------------
 
-app.get("/", (req, res) => {
-  res.json({
-    success: true,
-    service: "ProfSyn Monday → Railway",
-    status: "online",
-    collectedSyn: collectedSyn.size
-  });
+app.get("/", async (req, res) => {
+  try {
+    const result = await pool.query(
+      "SELECT COUNT(*)::int AS count FROM syn"
+    );
+
+    res.json({
+      success: true,
+      service: "ProfSyn Monday → Railway",
+      status: "online",
+      collectedSyn: result.rows[0].count
+    });
+  } catch (error) {
+    res.status(500).json({
+      success: false,
+      error: error.message
+    });
+  }
 });
 
 // --------------------------------------------------
-// HENT ALLE OPSAMLEDE SYN
+// HENT ALLE SYN
 // --------------------------------------------------
 
-app.get("/api/syn", (req, res) => {
-  const syn = Array.from(collectedSyn.values());
+app.get("/api/syn", async (req, res) => {
+  try {
+    const result = await pool.query(`
+      SELECT
+        item_id AS "itemId",
+        lejemalsnr AS "lejemålsnr",
+        adresse,
+        vaerelser AS "værelser",
+        type_syn AS "typeSyn",
+        TO_CHAR(dato, 'YYYY-MM-DD') AS dato,
+        sent_to_zapier AS "sentToZapier"
+      FROM syn
+      ORDER BY created_at ASC
+    `);
 
-  res.json({
-    success: true,
-    count: syn.length,
-    syn
-  });
+    res.json({
+      success: true,
+      count: result.rows.length,
+      syn: result.rows
+    });
+  } catch (error) {
+    res.status(500).json({
+      success: false,
+      error: error.message
+    });
+  }
 });
 
 // --------------------------------------------------
-// RYD ALLE OPSAMLEDE SYN
+// RYD ALLE SYN
 // KUN TIL TEST
 // --------------------------------------------------
 
-app.delete("/api/syn", (req, res) => {
-  const count = collectedSyn.size;
+app.delete("/api/syn", async (req, res) => {
+  try {
+    const result = await pool.query("DELETE FROM syn");
 
-  collectedSyn.clear();
-
-  res.json({
-    success: true,
-    deleted: count
-  });
+    res.json({
+      success: true,
+      deleted: result.rowCount
+    });
+  } catch (error) {
+    res.status(500).json({
+      success: false,
+      error: error.message
+    });
+  }
 });
 
 // --------------------------------------------------
-// SEND ALLE OPSAMLEDE SYN TIL ZAPIER
-// GET bruges midlertidigt til nem test fra browser
+// SEND ALLE IKKE-SENDTE SYN TIL ZAPIER
 // --------------------------------------------------
 
 app.get("/api/send-to-zapier", async (req, res) => {
@@ -110,12 +174,25 @@ app.get("/api/send-to-zapier", async (req, res) => {
       );
     }
 
-    const syn = Array.from(collectedSyn.values());
+    const result = await pool.query(`
+      SELECT
+        item_id AS "itemId",
+        lejemalsnr AS "lejemålsnr",
+        adresse,
+        vaerelser AS "værelser",
+        type_syn AS "typeSyn",
+        TO_CHAR(dato, 'YYYY-MM-DD') AS dato
+      FROM syn
+      WHERE sent_to_zapier = FALSE
+      ORDER BY created_at ASC
+    `);
+
+    const syn = result.rows;
 
     if (syn.length === 0) {
       return res.status(400).json({
         success: false,
-        error: "Ingen syn er opsamlet"
+        error: "Ingen ikke-sendte syn er opsamlet"
       });
     }
 
@@ -141,9 +218,17 @@ app.get("/api/send-to-zapier", async (req, res) => {
       );
     }
 
+    await pool.query(`
+      UPDATE syn
+      SET
+        sent_to_zapier = TRUE,
+        sent_at = CURRENT_TIMESTAMP
+      WHERE sent_to_zapier = FALSE
+    `);
+
     console.log(`Sendt til Zapier: ${syn.length} syn`);
 
-    return res.status(200).json({
+    return res.json({
       success: true,
       sentToZapier: syn.length,
       zapierResponse: responseText
@@ -165,10 +250,7 @@ app.get("/api/send-to-zapier", async (req, res) => {
 
 app.post("/monday/webhook", async (req, res) => {
 
-  // ------------------------------------------------
-  // MONDAY CHALLENGE
-  // ------------------------------------------------
-
+  // Monday challenge
   if (req.body?.challenge) {
     console.log("Monday webhook challenge received");
 
@@ -187,13 +269,10 @@ app.post("/monday/webhook", async (req, res) => {
       });
     }
 
-    const itemId = event.pulseId;
+    const itemId = String(event.pulseId);
 
-    // ------------------------------------------------
-    // KUN:
+    // Kun:
     // Send til E-conomics = Sendt
-    // ------------------------------------------------
-
     if (
       event.columnTitle !== "Send til E-conomics" ||
       event.value?.label?.text !== "Sendt"
@@ -204,22 +283,8 @@ app.post("/monday/webhook", async (req, res) => {
       });
     }
 
-    const itemKey = String(itemId);
-
     // ------------------------------------------------
-    // UNDGÅ DUBLETTER
-    // ------------------------------------------------
-
-    if (collectedSyn.has(itemKey)) {
-      return res.status(200).json({
-        success: true,
-        duplicate: true,
-        itemId: itemKey
-      });
-    }
-
-    // ------------------------------------------------
-    // HENT RELEVANTE DATA FRA MONDAY
+    // HENT DATA FRA MONDAY
     // ------------------------------------------------
 
     const query = `
@@ -268,7 +333,7 @@ app.post("/monday/webhook", async (req, res) => {
     }
 
     // ------------------------------------------------
-    // OPRET SYN
+    // SYN
     // ------------------------------------------------
 
     const syn = {
@@ -281,27 +346,53 @@ app.post("/monday/webhook", async (req, res) => {
     };
 
     // ------------------------------------------------
-    // GEM SYN
+    // GEM I POSTGRES
     // ------------------------------------------------
 
-    collectedSyn.set(syn.itemId, syn);
-
-    console.log(
-      `Syn gemt | item: ${syn.itemId} | lejemål: ${syn.lejemålsnr} | type: ${syn.typeSyn} | samlet: ${collectedSyn.size}`
+    await pool.query(
+      `
+      INSERT INTO syn (
+        item_id,
+        lejemalsnr,
+        adresse,
+        vaerelser,
+        type_syn,
+        dato
+      )
+      VALUES ($1, $2, $3, $4, $5, $6)
+      ON CONFLICT (item_id)
+      DO UPDATE SET
+        lejemalsnr = EXCLUDED.lejemalsnr,
+        adresse = EXCLUDED.adresse,
+        vaerelser = EXCLUDED.vaerelser,
+        type_syn = EXCLUDED.type_syn,
+        dato = EXCLUDED.dato
+      `,
+      [
+        syn.itemId,
+        syn.lejemålsnr,
+        syn.adresse,
+        syn.værelser,
+        syn.typeSyn,
+        syn.dato || null
+      ]
     );
 
-    // ------------------------------------------------
-    // SVAR TIL MONDAY
-    // ------------------------------------------------
+    const countResult = await pool.query(
+      "SELECT COUNT(*)::int AS count FROM syn"
+    );
+
+    console.log(
+      `Syn gemt | item: ${syn.itemId} | lejemål: ${syn.lejemålsnr} | type: ${syn.typeSyn} | samlet: ${countResult.rows[0].count}`
+    );
 
     return res.status(200).json({
       success: true,
       collected: true,
-      count: collectedSyn.size
+      count: countResult.rows[0].count
     });
 
   } catch (error) {
-
     console.error("Webhook error:", error.message);
 
     return res.status(500).json({
@@ -315,6 +406,17 @@ app.post("/monday/webhook", async (req, res) => {
 // START SERVER
 // --------------------------------------------------
 
-app.listen(PORT, "0.0.0.0", () => {
-  console.log(`Server running on port ${PORT}`);
-});
+async function startServer() {
+  try {
+    await initializeDatabase();
+
+    app.listen(PORT, "0.0.0.0", () => {
+      console.log(`Server running on port ${PORT}`);
+    });
+  } catch (error) {
+    console.error("Database startup error:", error);
+    process.exit(1);
+  }
+}
+
+startServer();

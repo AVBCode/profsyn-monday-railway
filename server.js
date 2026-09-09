@@ -6,12 +6,12 @@ app.use(express.json());
 
 const PORT = process.env.PORT || 3000;
 const MONDAY_API_TOKEN = process.env.MONDAY_API_TOKEN;
+const ZAPIER_WEBHOOK_URL = process.env.ZAPIER_WEBHOOK_URL;
 
 // --------------------------------------------------
 // OPSAMLING AF SYN
 // --------------------------------------------------
-// Key = itemId
-// Value = syn-data
+
 const collectedSyn = new Map();
 
 // --------------------------------------------------
@@ -96,15 +96,75 @@ app.delete("/api/syn", (req, res) => {
 });
 
 // --------------------------------------------------
+// SEND ALLE OPSAMLEDE SYN TIL ZAPIER
+// --------------------------------------------------
+
+app.post("/api/send-to-zapier", async (req, res) => {
+  try {
+    if (!ZAPIER_WEBHOOK_URL) {
+      throw new Error(
+        "ZAPIER_WEBHOOK_URL mangler i Railway Variables"
+      );
+    }
+
+    const syn = Array.from(collectedSyn.values());
+
+    if (syn.length === 0) {
+      return res.status(400).json({
+        success: false,
+        error: "Ingen syn er opsamlet"
+      });
+    }
+
+    const payload = {
+      success: true,
+      count: syn.length,
+      syn
+    };
+
+    const response = await fetch(ZAPIER_WEBHOOK_URL, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify(payload)
+    });
+
+    const responseText = await response.text();
+
+    if (!response.ok) {
+      throw new Error(
+        `Zapier HTTP ${response.status}: ${responseText}`
+      );
+    }
+
+    console.log(
+      `Sendt til Zapier: ${syn.length} syn`
+    );
+
+    return res.status(200).json({
+      success: true,
+      sentToZapier: syn.length,
+      zapierResponse: responseText
+    });
+
+  } catch (error) {
+    console.error("Send til Zapier fejl:", error.message);
+
+    return res.status(500).json({
+      success: false,
+      error: error.message
+    });
+  }
+});
+
+// --------------------------------------------------
 // MONDAY WEBHOOK
 // --------------------------------------------------
 
 app.post("/monday/webhook", async (req, res) => {
 
-  // ------------------------------------------------
-  // MONDAY CHALLENGE
-  // ------------------------------------------------
-
+  // Monday verification challenge
   if (req.body?.challenge) {
     console.log("Monday webhook challenge received");
 
@@ -123,14 +183,10 @@ app.post("/monday/webhook", async (req, res) => {
       });
     }
 
-    const boardId = event.boardId;
     const itemId = event.pulseId;
 
-    // ------------------------------------------------
-    // KUN:
+    // Kun:
     // Send til E-conomics = Sendt
-    // ------------------------------------------------
-
     if (
       event.columnTitle !== "Send til E-conomics" ||
       event.value?.label?.text !== "Sendt"
@@ -141,12 +197,9 @@ app.post("/monday/webhook", async (req, res) => {
       });
     }
 
-    // ------------------------------------------------
-    // UNDGÅ DUBLETTER
-    // ------------------------------------------------
-
     const itemKey = String(itemId);
 
+    // Undgå dubletter
     if (collectedSyn.has(itemKey)) {
       return res.status(200).json({
         success: true,
@@ -155,10 +208,7 @@ app.post("/monday/webhook", async (req, res) => {
       });
     }
 
-    // ------------------------------------------------
-    // HENT RELEVANTE DATA FRA MONDAY
-    // ------------------------------------------------
-
+    // Hent relevante felter fra Monday
     const query = `
       query GetItem($itemId: ID!) {
         items(ids: [$itemId]) {
@@ -191,10 +241,6 @@ app.post("/monday/webhook", async (req, res) => {
       );
     }
 
-    // ------------------------------------------------
-    // MAP MONDAY COLUMNS
-    // ------------------------------------------------
-
     const columns = {};
 
     for (const column of item.column_values || []) {
@@ -204,10 +250,7 @@ app.post("/monday/webhook", async (req, res) => {
       };
     }
 
-    // ------------------------------------------------
-    // OPRET SYN
-    // ------------------------------------------------
-
+    // Opret syn
     const syn = {
       itemId: String(item.id),
       lejemålsnr: columns.text71?.text || "",
@@ -217,33 +260,20 @@ app.post("/monday/webhook", async (req, res) => {
       dato: columns.date5?.text || ""
     };
 
-    // ------------------------------------------------
-    // GEM SYN
-    // ------------------------------------------------
-
+    // Gem syn
     collectedSyn.set(syn.itemId, syn);
-
-    // ------------------------------------------------
-    // KORT LOGGING
-    // ------------------------------------------------
 
     console.log(
       `Syn gemt | item: ${syn.itemId} | lejemål: ${syn.lejemålsnr} | type: ${syn.typeSyn} | samlet: ${collectedSyn.size}`
     );
 
-    // ------------------------------------------------
-    // SVAR TIL MONDAY
-    // ------------------------------------------------
-
     return res.status(200).json({
       success: true,
       collected: true,
-      count: collectedSyn.size,
-      syn
+      count: collectedSyn.size
     });
 
   } catch (error) {
-
     console.error("Webhook error:", error.message);
 
     return res.status(500).json({

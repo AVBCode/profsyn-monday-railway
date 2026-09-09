@@ -26,7 +26,7 @@ const pool = new Pool({
 });
 
 // --------------------------------------------------
-// INITIALISER DATABASE
+// DATABASE INITIALISERING
 // --------------------------------------------------
 
 async function initializeDatabase() {
@@ -86,7 +86,7 @@ async function mondayGraphQL(query, variables = {}) {
 }
 
 // --------------------------------------------------
-// STATUS
+// TEST / STATUS
 // --------------------------------------------------
 
 app.get("/", async (req, res) => {
@@ -110,7 +110,7 @@ app.get("/", async (req, res) => {
 });
 
 // --------------------------------------------------
-// HENT ALLE SYN
+// HENT ALLE OPSAMLEDE SYN
 // --------------------------------------------------
 
 app.get("/api/syn", async (req, res) => {
@@ -142,6 +142,72 @@ app.get("/api/syn", async (req, res) => {
 });
 
 // --------------------------------------------------
+// MIDLERTIDIGT TEST-ENDPOINT
+// VISER ALLE KOLONNER PÅ ET ITEM
+// --------------------------------------------------
+
+app.get("/api/item-columns/:itemId", async (req, res) => {
+  try {
+    const itemId = req.params.itemId;
+
+    const query = `
+      query GetItem($itemId: ID!) {
+        items(ids: [$itemId]) {
+          id
+          name
+          column_values {
+            id
+            text
+            value
+            column {
+              id
+              title
+              type
+            }
+          }
+        }
+      }
+    `;
+
+    const data = await mondayGraphQL(query, {
+      itemId
+    });
+
+    const item = data.items?.[0];
+
+    if (!item) {
+      return res.status(404).json({
+        success: false,
+        error: `Kunne ikke finde item ${itemId}`
+      });
+    }
+
+    const columns = (item.column_values || []).map((column) => ({
+      id: column.id,
+      title: column.column?.title || "",
+      type: column.column?.type || "",
+      text: column.text,
+      value: column.value
+    }));
+
+    res.json({
+      success: true,
+      itemId: item.id,
+      itemName: item.name,
+      columns
+    });
+
+  } catch (error) {
+    console.error("Item columns error:", error.message);
+
+    res.status(500).json({
+      success: false,
+      error: error.message
+    });
+  }
+});
+
+// --------------------------------------------------
 // RYD ALLE SYN
 // KUN TIL TEST
 // --------------------------------------------------
@@ -163,7 +229,7 @@ app.delete("/api/syn", async (req, res) => {
 });
 
 // --------------------------------------------------
-// SEND ALLE IKKE-SENDTE SYN TIL ZAPIER
+// SEND IKKE-SENDTE SYN TIL ZAPIER
 // --------------------------------------------------
 
 app.get("/api/send-to-zapier", async (req, res) => {
@@ -250,7 +316,7 @@ app.get("/api/send-to-zapier", async (req, res) => {
 
 app.post("/monday/webhook", async (req, res) => {
 
-  // Monday challenge
+  // Monday verification
   if (req.body?.challenge) {
     console.log("Monday webhook challenge received");
 
@@ -271,7 +337,7 @@ app.post("/monday/webhook", async (req, res) => {
 
     const itemId = String(event.pulseId);
 
-    // Kun:
+    // Kun når:
     // Send til E-conomics = Sendt
     if (
       event.columnTitle !== "Send til E-conomics" ||
@@ -284,7 +350,7 @@ app.post("/monday/webhook", async (req, res) => {
     }
 
     // ------------------------------------------------
-    // HENT DATA FRA MONDAY
+    // HENT RELEVANTE DATA FRA MONDAY
     // ------------------------------------------------
 
     const query = `
@@ -308,7 +374,7 @@ app.post("/monday/webhook", async (req, res) => {
     `;
 
     const data = await mondayGraphQL(query, {
-      itemId: itemId
+      itemId
     });
 
     const item = data.items?.[0];
@@ -319,10 +385,6 @@ app.post("/monday/webhook", async (req, res) => {
       );
     }
 
-    // ------------------------------------------------
-    // MAP MONDAY COLUMNS
-    // ------------------------------------------------
-
     const columns = {};
 
     for (const column of item.column_values || []) {
@@ -331,10 +393,6 @@ app.post("/monday/webhook", async (req, res) => {
         value: column.value
       };
     }
-
-    // ------------------------------------------------
-    // SYN
-    // ------------------------------------------------
 
     const syn = {
       itemId: String(item.id),

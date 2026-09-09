@@ -14,10 +14,6 @@ const DATABASE_URL = process.env.DATABASE_URL;
 // POSTGRESQL
 // --------------------------------------------------
 
-if (!DATABASE_URL) {
-  console.error("DATABASE_URL mangler i Railway Variables");
-}
-
 const pool = new Pool({
   connectionString: DATABASE_URL,
   ssl: {
@@ -33,6 +29,7 @@ async function initializeDatabase() {
   await pool.query(`
     CREATE TABLE IF NOT EXISTS syn (
       item_id TEXT PRIMARY KEY,
+      kunde TEXT,
       lejemalsnr TEXT,
       adresse TEXT,
       vaerelser TEXT,
@@ -42,6 +39,11 @@ async function initializeDatabase() {
       sent_to_zapier BOOLEAN DEFAULT FALSE,
       sent_at TIMESTAMP NULL
     )
+  `);
+
+  await pool.query(`
+    ALTER TABLE syn
+    ADD COLUMN IF NOT EXISTS kunde TEXT
   `);
 
   console.log("Database klar");
@@ -86,7 +88,7 @@ async function mondayGraphQL(query, variables = {}) {
 }
 
 // --------------------------------------------------
-// TEST / STATUS
+// STATUS
 // --------------------------------------------------
 
 app.get("/", async (req, res) => {
@@ -118,6 +120,7 @@ app.get("/api/syn", async (req, res) => {
     const result = await pool.query(`
       SELECT
         item_id AS "itemId",
+        kunde,
         lejemalsnr AS "lejemålsnr",
         adresse,
         vaerelser AS "værelser",
@@ -142,8 +145,8 @@ app.get("/api/syn", async (req, res) => {
 });
 
 // --------------------------------------------------
-// MIDLERTIDIGT TEST-ENDPOINT
-// VISER ALLE KOLONNER PÅ ET ITEM
+// TEST-ENDPOINT
+// VIS ALLE KOLONNER PÅ ET MONDAY ITEM
 // --------------------------------------------------
 
 app.get("/api/item-columns/:itemId", async (req, res) => {
@@ -243,6 +246,7 @@ app.get("/api/send-to-zapier", async (req, res) => {
     const result = await pool.query(`
       SELECT
         item_id AS "itemId",
+        kunde,
         lejemalsnr AS "lejemålsnr",
         adresse,
         vaerelser AS "værelser",
@@ -316,7 +320,7 @@ app.get("/api/send-to-zapier", async (req, res) => {
 
 app.post("/monday/webhook", async (req, res) => {
 
-  // Monday verification
+  // Monday verification challenge
   if (req.body?.challenge) {
     console.log("Monday webhook challenge received");
 
@@ -337,8 +341,11 @@ app.post("/monday/webhook", async (req, res) => {
 
     const itemId = String(event.pulseId);
 
-    // Kun når:
+    // ------------------------------------------------
+    // KUN:
     // Send til E-conomics = Sendt
+    // ------------------------------------------------
+
     if (
       event.columnTitle !== "Send til E-conomics" ||
       event.value?.label?.text !== "Sendt"
@@ -350,7 +357,7 @@ app.post("/monday/webhook", async (req, res) => {
     }
 
     // ------------------------------------------------
-    // HENT RELEVANTE DATA FRA MONDAY
+    // HENT DATA FRA MONDAY
     // ------------------------------------------------
 
     const query = `
@@ -385,6 +392,10 @@ app.post("/monday/webhook", async (req, res) => {
       );
     }
 
+    // ------------------------------------------------
+    // MAP MONDAY COLUMNS
+    // ------------------------------------------------
+
     const columns = {};
 
     for (const column of item.column_values || []) {
@@ -394,8 +405,14 @@ app.post("/monday/webhook", async (req, res) => {
       };
     }
 
+    // ------------------------------------------------
+    // OPRET SYN
+    // Kunde kommer fra item.name
+    // ------------------------------------------------
+
     const syn = {
       itemId: String(item.id),
+      kunde: item.name || "",
       lejemålsnr: columns.text71?.text || "",
       adresse: columns.text4?.text || "",
       værelser: columns.text?.text || "",
@@ -411,15 +428,17 @@ app.post("/monday/webhook", async (req, res) => {
       `
       INSERT INTO syn (
         item_id,
+        kunde,
         lejemalsnr,
         adresse,
         vaerelser,
         type_syn,
         dato
       )
-      VALUES ($1, $2, $3, $4, $5, $6)
+      VALUES ($1, $2, $3, $4, $5, $6, $7)
       ON CONFLICT (item_id)
       DO UPDATE SET
+        kunde = EXCLUDED.kunde,
         lejemalsnr = EXCLUDED.lejemalsnr,
         adresse = EXCLUDED.adresse,
         vaerelser = EXCLUDED.vaerelser,
@@ -428,6 +447,7 @@ app.post("/monday/webhook", async (req, res) => {
       `,
       [
         syn.itemId,
+        syn.kunde,
         syn.lejemålsnr,
         syn.adresse,
         syn.værelser,
@@ -441,7 +461,7 @@ app.post("/monday/webhook", async (req, res) => {
     );
 
     console.log(
-      `Syn gemt | item: ${syn.itemId} | lejemål: ${syn.lejemålsnr} | type: ${syn.typeSyn} | samlet: ${countResult.rows[0].count}`
+      `Syn gemt | kunde: ${syn.kunde} | item: ${syn.itemId} | lejemål: ${syn.lejemålsnr} | type: ${syn.typeSyn} | samlet: ${countResult.rows[0].count}`
     );
 
     return res.status(200).json({

@@ -8,13 +8,14 @@ const PORT = process.env.PORT || 3000;
 const MONDAY_API_TOKEN = process.env.MONDAY_API_TOKEN;
 
 // --------------------------------------------------
-// Midlertidig opsamling af syn
+// OPSAMLING AF SYN
 // --------------------------------------------------
-
+// Key = itemId
+// Value = syn-data
 const collectedSyn = new Map();
 
 // --------------------------------------------------
-// Monday GraphQL helper
+// MONDAY GRAPHQL
 // --------------------------------------------------
 
 async function mondayGraphQL(query, variables = {}) {
@@ -52,7 +53,7 @@ async function mondayGraphQL(query, variables = {}) {
 }
 
 // --------------------------------------------------
-// Test endpoint
+// TEST / STATUS
 // --------------------------------------------------
 
 app.get("/", (req, res) => {
@@ -65,7 +66,7 @@ app.get("/", (req, res) => {
 });
 
 // --------------------------------------------------
-// Se alle opsamlede syn
+// HENT ALLE OPSAMLEDE SYN
 // --------------------------------------------------
 
 app.get("/api/syn", (req, res) => {
@@ -79,8 +80,8 @@ app.get("/api/syn", (req, res) => {
 });
 
 // --------------------------------------------------
-// Ryd opsamlingen
-// Bruges kun under test
+// RYD ALLE OPSAMLEDE SYN
+// KUN TIL TEST
 // --------------------------------------------------
 
 app.delete("/api/syn", (req, res) => {
@@ -95,18 +96,18 @@ app.delete("/api/syn", (req, res) => {
 });
 
 // --------------------------------------------------
-// Monday webhook
+// MONDAY WEBHOOK
 // --------------------------------------------------
 
 app.post("/monday/webhook", async (req, res) => {
-  console.log("Received from Monday:");
-  console.log(JSON.stringify(req.body, null, 2));
 
-  // --------------------------------------------------
-  // Monday verification challenge
-  // --------------------------------------------------
+  // ------------------------------------------------
+  // MONDAY CHALLENGE
+  // ------------------------------------------------
 
   if (req.body?.challenge) {
+    console.log("Monday webhook challenge received");
+
     return res.json({
       challenge: req.body.challenge
     });
@@ -125,43 +126,38 @@ app.post("/monday/webhook", async (req, res) => {
     const boardId = event.boardId;
     const itemId = event.pulseId;
 
-    console.log("Board ID:", boardId);
-    console.log("Item ID:", itemId);
-
-    // --------------------------------------------------
-    // Kun reager på:
+    // ------------------------------------------------
+    // KUN:
     // Send til E-conomics = Sendt
-    // --------------------------------------------------
+    // ------------------------------------------------
 
     if (
       event.columnTitle !== "Send til E-conomics" ||
       event.value?.label?.text !== "Sendt"
     ) {
-      console.log("Ignorerer event - status er ikke Sendt.");
-
       return res.status(200).json({
         success: true,
         ignored: true
       });
     }
 
-    // --------------------------------------------------
-    // Undgå dublet
-    // --------------------------------------------------
+    // ------------------------------------------------
+    // UNDGÅ DUBLETTER
+    // ------------------------------------------------
 
-    if (collectedSyn.has(String(itemId))) {
-      console.log(`Item ${itemId} findes allerede i opsamlingen.`);
+    const itemKey = String(itemId);
 
+    if (collectedSyn.has(itemKey)) {
       return res.status(200).json({
         success: true,
         duplicate: true,
-        itemId: String(itemId)
+        itemId: itemKey
       });
     }
 
-    // --------------------------------------------------
-    // Hent kun de relevante Monday-kolonner
-    // --------------------------------------------------
+    // ------------------------------------------------
+    // HENT RELEVANTE DATA FRA MONDAY
+    // ------------------------------------------------
 
     const query = `
       query GetItem($itemId: ID!) {
@@ -190,12 +186,14 @@ app.post("/monday/webhook", async (req, res) => {
     const item = data.items?.[0];
 
     if (!item) {
-      throw new Error(`Kunne ikke finde item ${itemId} på Monday`);
+      throw new Error(
+        `Kunne ikke finde item ${itemId} på Monday`
+      );
     }
 
-    // --------------------------------------------------
-    // Map Monday columns
-    // --------------------------------------------------
+    // ------------------------------------------------
+    // MAP MONDAY COLUMNS
+    // ------------------------------------------------
 
     const columns = {};
 
@@ -206,9 +204,9 @@ app.post("/monday/webhook", async (req, res) => {
       };
     }
 
-    // --------------------------------------------------
-    // Opret syn
-    // --------------------------------------------------
+    // ------------------------------------------------
+    // OPRET SYN
+    // ------------------------------------------------
 
     const syn = {
       itemId: String(item.id),
@@ -219,17 +217,23 @@ app.post("/monday/webhook", async (req, res) => {
       dato: columns.date5?.text || ""
     };
 
-    // --------------------------------------------------
-    // Gem syn
-    // --------------------------------------------------
+    // ------------------------------------------------
+    // GEM SYN
+    // ------------------------------------------------
 
     collectedSyn.set(syn.itemId, syn);
 
-    console.log("====================================");
-    console.log("NYT SYN GEMT");
-    console.log(JSON.stringify(syn, null, 2));
-    console.log("SAMLET ANTAL SYN:", collectedSyn.size);
-    console.log("====================================");
+    // ------------------------------------------------
+    // KORT LOGGING
+    // ------------------------------------------------
+
+    console.log(
+      `Syn gemt | item: ${syn.itemId} | lejemål: ${syn.lejemålsnr} | type: ${syn.typeSyn} | samlet: ${collectedSyn.size}`
+    );
+
+    // ------------------------------------------------
+    // SVAR TIL MONDAY
+    // ------------------------------------------------
 
     return res.status(200).json({
       success: true,
@@ -239,8 +243,8 @@ app.post("/monday/webhook", async (req, res) => {
     });
 
   } catch (error) {
-    console.error("ERROR:");
-    console.error(error);
+
+    console.error("Webhook error:", error.message);
 
     return res.status(500).json({
       success: false,
@@ -250,7 +254,7 @@ app.post("/monday/webhook", async (req, res) => {
 });
 
 // --------------------------------------------------
-// Start server
+// START SERVER
 // --------------------------------------------------
 
 app.listen(PORT, "0.0.0.0", () => {

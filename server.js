@@ -8,7 +8,7 @@ const PORT = process.env.PORT || 3000;
 const MONDAY_API_TOKEN = process.env.MONDAY_API_TOKEN;
 
 // --------------------------------------------------
-// Hjælpefunktion: kald Monday GraphQL API
+// Monday GraphQL helper
 // --------------------------------------------------
 async function mondayGraphQL(query, variables = {}) {
   if (!MONDAY_API_TOKEN) {
@@ -85,14 +85,16 @@ app.post("/monday/webhook", async (req, res) => {
     console.log("Board ID:", boardId);
     console.log("Item ID:", itemId);
 
-    // Vi reagerer kun på:
+    // --------------------------------------------------
+    // Kun når:
     // Send til E-conomics = Sendt
+    // --------------------------------------------------
     if (
       event.columnTitle !== "Send til E-conomics" ||
       event.value?.label?.text !== "Sendt"
     ) {
-      console.log("Ignorerer event - ikke Sendt.");
-      
+      console.log("Ignorerer event - status er ikke Sendt.");
+
       return res.status(200).json({
         success: true,
         ignored: true
@@ -102,13 +104,18 @@ app.post("/monday/webhook", async (req, res) => {
     // --------------------------------------------------
     // Hent item fra Monday
     // --------------------------------------------------
-
     const query = `
       query GetItem($itemId: ID!) {
         items(ids: [$itemId]) {
           id
           name
-          column_values {
+          column_values(ids: [
+            "text71",
+            "text4",
+            "text",
+            "text7",
+            "date5"
+          ]) {
             id
             text
             value
@@ -118,7 +125,7 @@ app.post("/monday/webhook", async (req, res) => {
     `;
 
     const data = await mondayGraphQL(query, {
-      itemId: Number(itemId)
+      itemId: itemId
     });
 
     const item = data.items?.[0];
@@ -127,13 +134,9 @@ app.post("/monday/webhook", async (req, res) => {
       throw new Error(`Kunne ikke finde item ${itemId} på Monday`);
     }
 
-    console.log("Monday item:");
-    console.log(JSON.stringify(item, null, 2));
-
     // --------------------------------------------------
-    // Her finder vi de ønskede felter
+    // Map Monday columns
     // --------------------------------------------------
-
     const columns = {};
 
     for (const column of item.column_values || []) {
@@ -143,32 +146,27 @@ app.post("/monday/webhook", async (req, res) => {
       };
     }
 
-    console.log("Columns:");
-    console.log(JSON.stringify(columns, null, 2));
+    // --------------------------------------------------
+    // Opret syn-objekt
+    // --------------------------------------------------
+    const syn = {
+      itemId: String(item.id),
+      lejemålsnr: columns.text71?.text || "",
+      adresse: columns.text4?.text || "",
+      værelser: columns.text?.text || "",
+      typeSyn: columns.text7?.text || "",
+      dato: columns.date5?.text || ""
+    };
 
-    // --------------------------------------------------
-    // MIDLERLERTIDIGT OUTPUT
-    // --------------------------------------------------
-    // Vi identificerer først præcis hvilke column IDs
-    // der svarer til:
-    //
-    // kunde
-    // adresse
-    // lejemålsnr.
-    // syn
-    // værelser
-    // dato
-    //
-    // så vi ikke gætter forkert.
-    // --------------------------------------------------
+    console.log("====================================");
+    console.log("NYT SYN MODTAGET");
+    console.log(JSON.stringify(syn, null, 2));
+    console.log("====================================");
 
     return res.status(200).json({
       success: true,
       received: true,
-      boardId,
-      itemId,
-      itemName: item.name,
-      columns
+      syn
     });
 
   } catch (error) {
